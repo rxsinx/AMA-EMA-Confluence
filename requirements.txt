@@ -1,0 +1,9 @@
+# Paper Trading Bot — AMA × EMA × RSI × Vol Avg Confluence
+# Zerodha Kite Connect · Streamlit Cloud deployment
+# Generated: 2026-05-01
+
+streamlit==1.45.1
+plotly==5.24.1
+pandas==2.2.3
+numpy==1.26.4
+kiteconnect==5.2.0
