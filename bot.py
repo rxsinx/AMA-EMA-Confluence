@@ -234,7 +234,11 @@ class PaperTradingBot:
         cost = self.brokerage + gross_proceeds * self.stt
 
         pnl = (price - pos.entry_price) * qty
-        net_pnl = pnl - cost - self.brokerage  # brokerage on both legs
+        # cost already contains exit-side brokerage + STT
+        # entry-side brokerage was deducted from cash at entry via _calculate_cost()
+        # so net_pnl = gross pnl - entry brokerage - exit brokerage - STT
+        entry_brokerage = self.brokerage
+        net_pnl = pnl - entry_brokerage - cost  # cost = exit_brokerage + stt
 
         self.portfolio.cash += gross_proceeds - cost
 
@@ -325,6 +329,11 @@ class PaperTradingBot:
             t = self.try_exit(symbol, last["close"], last["date"], "FORCED")
             if t:
                 trades.append(t)
+
+        # Append final equity point AFTER any force-close so curve reflects true cash
+        if signal_rows:
+            final_date = signal_rows[-1]["date"]
+            self.portfolio.equity_curve.append((final_date, self.portfolio.cash))
 
         return {
             "trades": trades,
