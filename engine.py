@@ -139,17 +139,27 @@ def detect_crossover(ama: np.ndarray, ema: np.ndarray, lookback: int = 3) -> str
     """
     Detect AMA–EMA crossover within last `lookback` bars.
     Returns 'BULLISH', 'BEARISH', or 'NONE'.
+    Skips NaN values to avoid False==False masking a real crossover.
     """
     n = len(ama)
     if n < lookback + 2:
         return "NONE"
 
-    # Current state
+    # Current bar must be valid
+    if np.isnan(ama[-1]) or np.isnan(ema[-1]):
+        return "NONE"
+
     curr_above = ama[-1] > ema[-1]
 
-    # Check if they were on opposite sides within lookback
+    # Scan backwards, skip NaN pairs
     for i in range(2, lookback + 2):
-        prev_above = ama[-i] > ema[-i]
+        if i >= n:
+            break
+        a_prev = ama[-i]
+        e_prev = ema[-i]
+        if np.isnan(a_prev) or np.isnan(e_prev):
+            continue  # skip NaN bars, keep looking
+        prev_above = a_prev > e_prev
         if curr_above != prev_above:
             return "BULLISH" if curr_above else "BEARISH"
 
@@ -260,14 +270,16 @@ def score_bar(row: pd.Series, prev_row: pd.Series,
     else:
         sig = Signal.HOLD
 
-    strength = "HOLD"
+    strength = "WEAK"  # default for any non-HOLD signal
     if sig != Signal.HOLD:
         if abs(weighted) >= STRONG_THRESHOLD:
             strength = "STRONG"
-        elif abs(weighted) >= BUY_THRESHOLD + 0.1:
+        elif abs(weighted) >= BUY_THRESHOLD + 0.10:
             strength = "MODERATE"
         else:
             strength = "WEAK"
+    else:
+        strength = "HOLD"
 
     return ConfluenceScore(
         raw_score=round(raw, 4),
