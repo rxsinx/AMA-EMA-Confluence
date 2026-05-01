@@ -310,7 +310,7 @@ def run_signals(df: pd.DataFrame, params: dict) -> list[dict]:
     for i in range(warmup, len(df)):
         row = df.iloc[i]
         prev_row = df.iloc[i - 1]
-        xo = detect_crossover(ama_arr[:i+1], ema_arr[:i+1], lookback=3)
+        xo = detect_crossover(ama_arr[:i+1], ema_arr[:i+1], lookback=params.get("xo_lookback", 3))
         score = score_bar(row, prev_row, xo, params)
 
         results.append({
