@@ -104,8 +104,109 @@ with st.sidebar:
         st.info("📊 Demo mode — synthetic data")
 
     st.markdown("### Universe")
-    universe_name = st.selectbox("Index", list(UNIVERSES.keys()), label_visibility="collapsed")
-    symbols = get_universe(universe_name)
+    universe_source = st.radio(
+        "Source", ["Preset index", "Upload file", "Type list"],
+        horizontal=True, label_visibility="collapsed"
+    )
+
+    def _parse_symbols(raw: str) -> list:
+        """Split on comma, semicolon, newline, tab — strip, uppercase, deduplicate."""
+        import re
+        parts = re.split(r"[,;\n\t]+", raw)
+        seen, out = set(), []
+        for p in parts:
+            s = p.strip().upper()
+            # Strip common suffixes users paste: .NS .BSE -EQ
+            s = re.sub(r"(\.NS|\.BSE|-EQ)$", "", s)
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    if universe_source == "Preset index":
+        universe_name = st.selectbox("Index", list(UNIVERSES.keys()), label_visibility="collapsed")
+        symbols = get_universe(universe_name)
+
+    elif universe_source == "Upload file":
+        universe_name = "Uploaded"
+        uploaded = st.file_uploader(
+            "Upload .csv or .txt (one symbol per line, or comma-separated)",
+            type=["csv", "txt"],
+            label_visibility="collapsed",
+        )
+        if uploaded is not None:
+            try:
+                import io, pandas as pd
+                raw_bytes = uploaded.read().decode("utf-8", errors="ignore")
+
+                # CSV: try reading as dataframe first — handle headers like Symbol/Ticker/NSE Code
+                if uploaded.name.lower().endswith(".csv"):
+                    df_up = pd.read_csv(io.StringIO(raw_bytes))
+                    # Look for a column that likely holds symbols
+                    sym_col = None
+                    for col in df_up.columns:
+                        if col.strip().upper() in ["SYMBOL","TICKER","NSE","SCRIP","STOCK","CODE","NAME","SCRIP CODE","NSE CODE"]:
+                            sym_col = col
+                            break
+                    if sym_col:
+                        raw_text = ",".join(df_up[sym_col].dropna().astype(str).tolist())
+                    else:
+                        # No recognised header — treat whole file as flat text
+                        raw_text = raw_bytes
+                else:
+                    raw_text = raw_bytes
+
+                symbols = _parse_symbols(raw_text)
+                if symbols:
+                    st.success(f"{len(symbols)} symbols loaded from **{uploaded.name}**")
+                    with st.expander(f"Preview ({min(10, len(symbols))} of {len(symbols)})", expanded=False):
+                        st.write(", ".join(symbols[:10]) + ("…" if len(symbols) > 10 else ""))
+                else:
+                    st.error("No valid symbols found. Check file format.")
+                    symbols = ["RELIANCE"]
+            except Exception as e:
+                st.error(f"Parse error: {e}")
+                symbols = ["RELIANCE"]
+            # Persist across reruns
+            st.session_state["uploaded_symbols"] = symbols
+        else:
+            # Reuse last upload if available
+            symbols = st.session_state.get("uploaded_symbols", [])
+            if not symbols:
+                st.info("Upload a .csv or .txt file with NSE symbols.")
+                symbols = ["RELIANCE"]
+            else:
+                st.caption(f"{len(symbols)} symbols from last upload still active.")
+
+    else:  # Type list
+        universe_name = "Custom"
+        raw_input = st.text_area(
+            "Enter symbols (comma, newline, or semicolon separated)",
+            value="RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK",
+            height=130,
+            label_visibility="collapsed",
+            help="NSE trading symbols. Paste up to ~200. Suffixes like .NS are auto-stripped.",
+        )
+        symbols = _parse_symbols(raw_input)
+        if symbols:
+            st.caption(f"{len(symbols)} symbol{'s' if len(symbols) != 1 else ''} loaded")
+        else:
+            st.warning("Enter at least one symbol.")
+            symbols = ["RELIANCE"]
+
+    # Show total count for all modes
+    if symbols and len(symbols) > 1:
+        st.caption(f"🔍 Scan will run on **{len(symbols)}** symbols")
+
+    st.markdown("### Crossover")
+    xo_lookback = st.slider(
+        "Crossover lookback (bars)", 1, 10, 3,
+        help="How many bars back to scan for an AMA-EMA crossover. On 1day interval, 3 = last 3 trading days."
+    )
+    st.caption(
+        "Crossover runs on the same interval as the chart tab. "
+        "On 1day: 3 bars = 3 trading days. On 60min: 3 bars = 3 hours."
+    )
 
     st.markdown("### Indicator Params")
     with st.expander("AMA", expanded=False):
@@ -142,6 +243,7 @@ with st.sidebar:
         ema_period=ema_period,
         rsi_period=rsi_period, rsi_ob=rsi_ob, rsi_os=rsi_os,
         vol_period=vol_period, vol_threshold=vol_threshold, vol_strong=vol_strong,
+        xo_lookback=xo_lookback,
     )
     bot_config = dict(
         capital=capital, position_size_pct=position_size,
@@ -161,64 +263,123 @@ tabs = st.tabs(["📡 Live Scan", "📈 Single Stock", "🔁 Backtest", "📊 Po
 # TAB 1 · LIVE SCAN
 # ═══════════════════════════════════════════════════════════════════════════
 with tabs[0]:
-    st.markdown('<div class="section-header">CONFLUENCE SCAN · ' + universe_name + '</div>', unsafe_allow_html=True)
+    n_syms = len(symbols)
+    # estimate: ~1.2s per symbol (Kite API) or ~0.05s demo
+    est_sec = n_syms * (1.2 if is_authenticated() else 0.05)
+    est_str = f"~{int(est_sec)}s" if est_sec < 120 else f"~{int(est_sec/60)}m"
 
-    col_run, col_ltp = st.columns([1, 4])
+    st.markdown(
+        f'<div class="section-header">CONFLUENCE SCAN · {universe_name} · {n_syms} symbols</div>',
+        unsafe_allow_html=True
+    )
+
+    col_run, col_sig_filter, col_str_filter = st.columns([1, 2, 2])
     with col_run:
-        run_scan = st.button("▶ Run Scan", use_container_width=True, type="primary")
+        run_scan = st.button(
+            f"▶ Run Scan  ({est_str})",
+            use_container_width=True, type="primary",
+            help=f"Will scan {n_syms} symbols. {est_str} estimated."
+        )
+    with col_sig_filter:
+        filter_signal = st.multiselect(
+            "Show signals", ["BUY", "SELL", "HOLD"],
+            default=["BUY", "SELL"], label_visibility="collapsed"
+        )
+    with col_str_filter:
+        filter_strength = st.multiselect(
+            "Min strength", ["STRONG", "MODERATE", "WEAK"],
+            default=["STRONG", "MODERATE", "WEAK"], label_visibility="collapsed"
+        )
 
     if run_scan:
         scan_results = []
-        progress = st.progress(0, text="Scanning...")
+        skipped = []
+        t_start = time.time()
+        status_box = st.empty()
+        progress = st.progress(0)
 
         for idx, sym in enumerate(symbols):
+            elapsed = time.time() - t_start
+            remaining = max(0, est_sec - elapsed)
+            pct = (idx + 1) / n_syms
+            status_box.caption(
+                f"Scanning **{sym}** ({idx+1}/{n_syms}) · "
+                f"{elapsed:.0f}s elapsed · ~{remaining:.0f}s remaining"
+            )
+            progress.progress(pct)
+
             df = get_price_data(sym, days=lookback_days, demo_mode=demo_mode)
             if df.empty or len(df) < 60:
+                skipped.append(sym)
                 continue
             signals = run_signals(df, params)
             if signals:
                 last = signals[-1]
                 scan_results.append({
-                    "Symbol":   sym,
-                    "Price":    round(last["close"], 2),
-                    "AMA":      round(last["ama"], 2),
-                    "EMA":      round(last["ema"], 2),
-                    "RSI":      round(last["rsi"], 1),
-                    "Vol Ratio":round(last["vol_ratio"], 2),
-                    "Score":    round(last["weighted_score"], 3),
-                    "Signal":   last["signal"],
-                    "Strength": last["strength"],
-                    "Crossover":last["crossover"],
+                    "Symbol":    sym,
+                    "Price":     round(last["close"], 2),
+                    "AMA":       round(last["ama"], 2),
+                    "EMA":       round(last["ema"], 2),
+                    "RSI":       round(last["rsi"], 1),
+                    "Vol Ratio": round(last["vol_ratio"], 2),
+                    "Score":     round(last["weighted_score"], 3),
+                    "Signal":    last["signal"],
+                    "Strength":  last["strength"],
+                    "Crossover": last["crossover"],
                 })
-            progress.progress((idx + 1) / len(symbols), text=f"Scanning {sym}...")
 
         progress.empty()
+        status_box.empty()
+        total_time = time.time() - t_start
         st.session_state["live_signals"] = scan_results
+        st.session_state["scan_meta"] = {
+            "total": n_syms, "scanned": len(scan_results),
+            "skipped": skipped, "elapsed": total_time,
+        }
 
     results = st.session_state.get("live_signals", [])
+    meta    = st.session_state.get("scan_meta", {})
+
     if results:
         df_res = pd.DataFrame(results).sort_values("Score", ascending=False)
 
-        # Summary pills
+        # ── Scan metadata bar ──────────────────────────────────────────────
+        if meta:
+            mcols = st.columns([1,1,1,1,2])
+            mcols[0].metric("Total symbols", meta.get("total", len(df_res)))
+            mcols[1].metric("Scanned OK",    meta.get("scanned", len(df_res)))
+            mcols[2].metric("Skipped",       len(meta.get("skipped", [])))
+            mcols[3].metric("Time",          f"{meta.get('elapsed', 0):.1f}s")
+            if meta.get("skipped"):
+                with mcols[4].expander(f"Skipped symbols ({len(meta['skipped'])})"):
+                    st.write(", ".join(meta["skipped"]))
+
+        # ── Signal summary ─────────────────────────────────────────────────
         buys  = len(df_res[df_res["Signal"] == "BUY"])
         sells = len(df_res[df_res["Signal"] == "SELL"])
         holds = len(df_res[df_res["Signal"] == "HOLD"])
 
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("Scanned", len(df_res))
-        with c2:
-            st.metric("🟢 BUY", buys)
-        with c3:
-            st.metric("🔴 SELL", sells)
-        with c4:
-            st.metric("⚪ HOLD", holds)
+        c1.metric("🟢 BUY",  buys)
+        c2.metric("🔴 SELL", sells)
+        c3.metric("⚪ HOLD", holds)
+        c4.metric("Total",   len(df_res))
 
-        # Score distribution chart
+        # ── Apply sidebar filters ──────────────────────────────────────────
+        df_filtered = df_res[
+            df_res["Signal"].isin(filter_signal) &
+            df_res["Strength"].isin(filter_strength + ["HOLD"])
+        ]
+        if len(df_filtered) < len(df_res):
+            st.caption(f"Showing {len(df_filtered)} of {len(df_res)} after filter")
+
+        # ── Score distribution chart ───────────────────────────────────────
         fig_hist = px.histogram(
-            df_res, x="Score", nbins=20, color_discrete_sequence=["#3A7BD5"],
-            title="Confluence Score Distribution",
+            df_res, x="Score", nbins=30, color_discrete_sequence=["#3A7BD5"],
+            title=f"Confluence Score Distribution — {len(df_res)} symbols",
         )
+        fig_hist.add_vline(x=0.35,  line_dash="dot", line_color="#1DB97B", line_width=1)
+        fig_hist.add_vline(x=-0.35, line_dash="dot", line_color="#E24B4A", line_width=1)
         fig_hist.update_layout(
             paper_bgcolor="#0D0F14", plot_bgcolor="#141820",
             font_color="#8A9BB0", title_font_color="#E8EDF3",
@@ -226,7 +387,7 @@ with tabs[0]:
         )
         st.plotly_chart(fig_hist, use_container_width=True)
 
-        # Results table with coloured Signal column
+        # ── Results table ──────────────────────────────────────────────────
         def signal_html(sig):
             cls = {"BUY": "sig-buy", "SELL": "sig-sell", "HOLD": "sig-hold"}.get(sig, "sig-hold")
             return f'<span class="signal-pill {cls}">{sig}</span>'
@@ -235,11 +396,28 @@ with tabs[0]:
             cls = {"STRONG": "strength-strong", "MODERATE": "strength-moderate", "WEAK": "strength-weak"}.get(s, "")
             return f'<span class="{cls}">{s}</span>'
 
-        display_df = df_res.copy()
+        display_df = df_filtered.copy()
         display_df["Signal"]   = display_df["Signal"].apply(signal_html)
         display_df["Strength"] = display_df["Strength"].apply(strength_html)
 
+        # Paginate for large lists
+        PAGE = 100
+        total_pages = max(1, (len(display_df) - 1) // PAGE + 1)
+        if total_pages > 1:
+            page = st.number_input("Page", 1, total_pages, 1, label_visibility="collapsed")
+            display_df = display_df.iloc[(page-1)*PAGE : page*PAGE]
+            st.caption(f"Page {page}/{total_pages}  ·  {PAGE} rows per page")
+
         st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+        # ── Download filtered results ──────────────────────────────────────
+        csv_out = df_filtered.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇ Download results CSV",
+            data=csv_out,
+            file_name=f"scan_{universe_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
     else:
         st.info("Click **▶ Run Scan** to scan the universe for confluence signals.")
 
